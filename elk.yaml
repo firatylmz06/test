@@ -1,8 +1,63 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: elasticsearch
+  labels:
+    app: elasticsearch
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: es-pv
+  namespace: elasticsearch
+spec:
+  capacity:
+    storage: 30Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: standard
+  hostPath:
+    path: /mnt/k8s/elasticsearch
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: es-pvc
+  namespace: elasticsearch
+spec:
+  resources:
+    requests:
+      storage: 30Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  selector:
+    matchLabels:
+      app: elasticsearch
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: elasticsearch-config
+  namespace: elasticsearch
+data:
+  ELASTIC_USERNAME: "admin"
+  ELASTIC_PASSWORD: "admin1234"
+  ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: elasticsearch
   namespace: elasticsearch
+  labels:
+    app: elasticsearch
 spec:
   replicas: 1
   selector:
@@ -14,82 +69,204 @@ spec:
         app: elasticsearch
     spec:
       containers:
-      - name: elasticsearch
-        image: elasticsearch:7.10.2
-        env:
-        - name: discovery.type
-          value: single-node
-        - name: ES_JAVA_OPTS
-          value: "-Xms512m -Xmx512m"
-        ports:
-        - containerPort: 9200
-        volumeMounts:
-        - name: es-data
-          mountPath: /usr/share/elasticsearch/data
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:7.17.9
+          env:
+            - name: discovery.type
+              value: single-node
+            - name: ELASTIC_USERNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: elasticsearch-config
+                  key: ELASTIC_USERNAME
+            - name: ELASTIC_PASSWORD
+              valueFrom:
+                configMapKeyRef:
+                  name: elasticsearch-config
+                  key: ELASTIC_PASSWORD
+            - name: ES_JAVA_OPTS
+              valueFrom:
+                configMapKeyRef:
+                  name: elasticsearch-config
+                  key: ES_JAVA_OPTS
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1000m"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"
+          ports:
+            - containerPort: 9200
+            - containerPort: 9300
+          volumeMounts:
+            - name: es-pv
+              mountPath: /usr/share/elasticsearch/data
       volumes:
-      - name: es-data
-        emptyDir: {}
+        - name: es-pv
+          persistentVolumeClaim:
+            claimName: es-pvc
 
 ---
-
 apiVersion: v1
 kind: Service
 metadata:
-  name: elasticsearch
+  name: elasticsearch-service
   namespace: elasticsearch
 spec:
-  ports:
-  - port: 9200
-    targetPort: 9200
   selector:
     app: elasticsearch
+  ports:
+    - port: 9200
+      targetPort: 9200
+  type: NodePort
 
 ---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: elasticsearch-ingress
+  namespace: elasticsearch
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: elasticsearch.firatyilmaz.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: elasticsearch-service
+                port:
+                  number: 9200
 
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: kibana-pv
+  namespace: elasticsearch
+spec:
+  capacity:
+    storage: 10Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: standard
+  hostPath:
+    path: /mnt/k8s/kibana
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kibana-pvc
+  namespace: elasticsearch
+spec:
+  resources:
+    requests:
+      storage: 10Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  selector:
+    matchLabels:
+      app: kibana
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: logstash
+  name: kibana
   namespace: elasticsearch
+  labels:
+    app: kibana
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: logstash
+      app: kibana
   template:
     metadata:
       labels:
-        app: logstash
+        app: kibana
     spec:
       containers:
-      - name: logstash
-        image: logstash:7.10.2
-        ports:
-        - containerPort: 5044
-        volumeMounts:
-        - name: logstash-config
-          mountPath: /usr/share/logstash/config/
+        - name: kibana
+          image: docker.elastic.co/kibana/kibana:7.17.9
+          env:
+            - name: ELASTICSEARCH_HOSTS
+              value: http://elasticsearch-service.elasticsearch.svc.cluster.local:9200
+          ports:
+            - containerPort: 5601
+          volumeMounts:
+            - name: kibana-pv
+              mountPath: /usr/share/kibana/data
       volumes:
-      - name: logstash-config
-        configMap:
-          name: logstash-config
+        - name: kibana-pv
+          persistentVolumeClaim:
+            claimName: kibana-pvc
 
 ---
-
 apiVersion: v1
 kind: Service
 metadata:
-  name: logstash
+  name: kibana-service
   namespace: elasticsearch
 spec:
-  ports:
-  - port: 5044
-    targetPort: 5044
   selector:
-    app: logstash
+    app: kibana
+  ports:
+    - port: 5601
+      targetPort: 5601
+  type: NodePort
 
 ---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kibana-ingress
+  namespace: elasticsearch
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: kibana.firatyilmaz.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kibana-service
+                port:
+                  number: 5601
 
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: logstash-pvc
+  namespace: elasticsearch
+spec:
+  resources:
+    requests:
+      storage: 20Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  selector:
+    matchLabels:
+      app: logstash
+
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -102,49 +279,101 @@ data:
         port => 5044
       }
     }
+    filter {
+      grok {
+        match => { "message" => "%{COMMONAPACHELOG}" }
+      }
+    }
     output {
       elasticsearch {
-        hosts => ["http://elasticsearch:9200"]
-        index => "logs-%{+YYYY.MM.dd}"
+        hosts => ["http://elasticsearch-service:9200"]
+        index => "logstash-%{+YYYY.MM.dd}"
+        user => "${ELASTIC_USERNAME}"
+        password => "${ELASTIC_PASSWORD}"
       }
     }
 
 ---
-
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: kibana
+  name: logstash
   namespace: elasticsearch
+  labels:
+    app: logstash
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: kibana
+      app: logstash
   template:
     metadata:
       labels:
-        app: kibana
+        app: logstash
     spec:
       containers:
-      - name: kibana
-        image: kibana:7.10.2
-        ports:
-        - containerPort: 5601
-        env:
-        - name: ELASTICSEARCH_HOSTS
-          value: "http://elasticsearch:9200"
+        - name: logstash
+          image: docker.elastic.co/logstash/logstash:7.17.9
+          env:
+            - name: ELASTIC_USERNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: elasticsearch-config
+                  key: ELASTIC_USERNAME
+            - name: ELASTIC_PASSWORD
+              valueFrom:
+                configMapKeyRef:
+                  name: elasticsearch-config
+                  key: ELASTIC_PASSWORD
+          ports:
+            - containerPort: 5044
+          volumeMounts:
+            - name: logstash-pv
+              mountPath: /usr/share/logstash/data
+            - name: logstash-config
+              mountPath: /usr/share/logstash/pipeline/logstash.conf
+              subPath: logstash.conf
+      volumes:
+        - name: logstash-pv
+          persistentVolumeClaim:
+            claimName: logstash-pvc
+        - name: logstash-config
+          configMap:
+            name: logstash-config
 
 ---
-
 apiVersion: v1
 kind: Service
 metadata:
-  name: kibana
+  name: logstash-service
   namespace: elasticsearch
 spec:
-  ports:
-  - port: 5601
-    targetPort: 5601
   selector:
-    app: kibana
+    app: logstash
+  ports:
+    - port: 5044
+      targetPort: 5044
+  type: ClusterIP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: logstash-ingress
+  namespace: elasticsearch
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: logstash.firatyilmaz.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: logstash-service
+                port:
+                  number: 5044
